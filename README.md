@@ -130,6 +130,161 @@ Primary files:
 - [Communications/system-coordinator.go](Communications/system-coordinator.go)
 - [Communications/network-metrics.go](Communications/network-metrics.go)
 
+## Tested Stack and Prerequisites
+
+This repository spans Unity, Go, Python, Arduino, MQTT, and FPGA tooling. For consistent behaviour across machines, start with the stack below.
+
+| Area | Version / Tooling | Source in repo |
+|---|---|---|
+| Unity visualiser | Unity `6000.4.0f1` | This README + scene setup |
+| Communications service | Go `1.24.11` | [Communications/go.mod](Communications/go.mod) |
+| AI scripts (training/runtime) | Python `3.10+` recommended | [AI/accelerator/training](AI/accelerator/training), [AI/accelerator/comms](AI/accelerator/comms), [AI/accelerator/ultra96_deploy](AI/accelerator/ultra96_deploy) |
+| Firmware | Arduino IDE 2.x + ESP32 support | [Hardware/imu](Hardware/imu), [Hardware/uwb](Hardware/uwb) |
+| Messaging | MQTT broker reachable by all devices (project commonly uses port `8883`) | [Communications/main.go](Communications/main.go), [Visualiser/Docs/System_Architecture.md](Visualiser/Docs/System_Architecture.md) |
+| FPGA runtime | Ultra96 + deployed bitstream (`design_1.bit`/`.hwh`) | [AI/accelerator/comms](AI/accelerator/comms), [AI/accelerator/ultra96_deploy](AI/accelerator/ultra96_deploy) |
+
+Before running end-to-end:
+
+1. Restore private certificates/keys removed from source control (see Security Removals).
+2. Ensure all runtime devices are on the same reachable network path (or VPN path where required).
+3. Keep path casing exact (`Hardware`, `Communications`, `Visualiser`) for cross-platform compatibility.
+
+## Reproducible End-to-End Runbook
+
+Use this startup order to reduce race conditions between Unity, broker, and Ultra96 services.
+
+### Step 1: Pin the code version used for your run
+
+From repo root:
+
+```bash
+git rev-parse --short HEAD
+```
+
+Record that commit hash with your test results.
+
+### Step 2: Prepare Python dependencies
+
+For host-side AI scripts and tooling:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install --upgrade pip
+pip install numpy pandas torch scikit-learn matplotlib optuna paho-mqtt
+```
+
+For Ultra96 FPGA runtime, ensure board-side dependencies (including `pynq`) are available in the Ultra96 Python environment.
+
+### Step 3: Start services in order
+
+1. Start the MQTT broker used by your deployment.
+2. Start communications service (laptop):
+
+```bash
+cd Communications
+go mod download
+go run .
+```
+
+3. Start Ultra96 AI client (Ultra96 side).
+
+Secure mTLS path:
+
+```bash
+cd AI/accelerator/comms
+python3 ai_u96_client.py
+```
+
+Development/no-TLS path:
+
+```bash
+cd AI/accelerator/comms
+python3 ai_u96_client_insecure.py
+```
+
+4. Start Unity visualiser: open `Visualiser` in Unity `6000.4.0f1`, load [Visualiser/Assets/Scenes/MainScene.unity](Visualiser/Assets/Scenes/MainScene.unity), and ensure MQTT endpoint settings are correct in [Visualiser/Assets/Scripts/MqttController.cs](Visualiser/Assets/Scripts/MqttController.cs).
+
+### Step 4: Validate data flow checkpoints
+
+Use this checklist before gameplay validation:
+
+1. `/paddle` packets arrive when moving paddle hardware or pressing buttons.
+2. `/playerBall` is published when the player hits the ball.
+3. `/opponentBall` is published in response by Ultra96 client.
+4. `/hitAck` is published after hit detection and haptic acknowledgement.
+
+### Step 4b: Software-only smoke test (no hardware required)
+
+If you only need to verify AI payload generation logic:
+
+```bash
+cd AI/accelerator/ultra96_deploy
+python3 ai_event_generator.py --demo
+```
+
+Expected result: 5 synthetic `/playerBall` events are processed and corresponding `/opponentBall` payloads are printed.
+
+### Step 5: Optional AI training reproducibility path
+
+If reproducing model artifacts from source data:
+
+```bash
+cd AI/accelerator/training
+python generate_dataset.py
+python tuner.py --n_trials 5000
+python train.py
+python export_weights_int8.py --out ../../hls/weights.h
+```
+
+## How To Play
+
+Gameplay behaviour and controls are aligned with [Visualiser/Docs/System_Architecture.md](Visualiser/Docs/System_Architecture.md).
+
+### Session setup
+
+1. Place the QR code at net centre and ensure anchors/space are clear.
+2. Start all services from the reproducible runbook.
+3. Confirm Unity has connected to MQTT and is receiving paddle data.
+
+### Button controls (ESP32 hardware)
+
+| Button | Action |
+|---|---|
+| 1 | Start / Pause / Resume |
+| 2 | Full Reset + Calibrate (gameplay reset + UWB/IMU recalibration) |
+| 3 | Reset Ball |
+| 4 | Cycle Mode (pre-game) / Full Reset (in-game) |
+
+### Game modes
+
+| Mode | Scoring | Match end | Opponent return speed |
+|---|---|---|---|
+| Normal | Enabled | Yes (11-point sets, best-of-3) | 1.0x |
+| Tutorial | Disabled | No | 1.0x |
+| God Mode | Disabled | No | 0.5x |
+
+### Rally flow
+
+1. Press Button 1 to enter play-ready state.
+2. Serve/hit to start the rally.
+3. Continue rally until a point-ending condition is detected.
+
+Point-ending conditions:
+
+- Boundary out
+- Double bounce
+- Net fault
+- Kitchen violation
+
+In Normal mode, score/set progression is applied automatically. In Tutorial and God Mode, no scoring is applied and play resets for continuous practice.
+
+### Fast troubleshooting while playing
+
+1. No opponent return: inspect `/opponentBall` publication path (Ultra96 client and broker connectivity).
+2. No haptic feedback: verify `/hitAck` publication and ESP32 subscriber path.
+3. Drift or placement mismatch: trigger Button 2 full recalibration and re-check QR anchor lock.
+
 ## Core MQTT Topics
 
 | Topic | Producer | Consumer | Purpose |
